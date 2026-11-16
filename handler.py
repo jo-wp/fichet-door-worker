@@ -12,7 +12,9 @@ import io
 import math
 import os
 import random
+import shutil
 import time
+import traceback
 
 # Cache Hugging Face : cache de modèles RunPod ou network volume s'il y en a un.
 if os.path.isdir("/runpod-volume"):
@@ -22,6 +24,7 @@ import requests
 import runpod
 import torch
 from diffusers import FlowMatchEulerDiscreteScheduler, QwenImageEditPlusPipeline
+from huggingface_hub import snapshot_download
 from PIL import Image, ImageOps
 
 MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen-Image-Edit-2511")
@@ -49,13 +52,24 @@ PIPE = None
 SCHEDULERS = {}
 
 
-def get_pipe():
+def disk_free_gb():
+    cache = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")
+    os.makedirs(cache, exist_ok=True)
+    return round(shutil.disk_usage(cache).free / 1024**3)
+
+
+def get_pipe(say=lambda msg: None):
     global PIPE
     if PIPE is None:
+        say(f"téléchargement des poids ({disk_free_gb()} Go libres)")
+        snapshot_download(MODEL_ID)
+        say("chargement du modèle en mémoire")
         pipe = QwenImageEditPlusPipeline.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16)
+        say("chargement du LoRA Lightning")
         SCHEDULERS["full"] = pipe.scheduler
         SCHEDULERS["fast"] = FlowMatchEulerDiscreteScheduler.from_config(LIGHTNING_SCHEDULER)
         pipe.load_lora_weights(LORA_REPO, weight_name=LORA_FILE, adapter_name="lightning")
+        say("transfert vers le GPU")
         vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
         if vram_gb >= 70:
             pipe.to("cuda")
@@ -89,6 +103,19 @@ def default_size(img):
 
 
 def handler(job):
+    try:
+        return run(job)
+    except Exception:  # renvoyé dans la sortie : on n'a pas toujours accès aux logs
+        return {"error": traceback.format_exc()[-3000:]}
+
+
+def run(job):
+    t0 = time.time()
+
+    def say(msg):
+        print(msg, flush=True)
+        runpod.serverless.progress_update(job, f"{msg} (t+{round(time.time() - t0)} s)")
+
     inp = job.get("input") or {}
     if inp.get("action") == "health":
         return {
@@ -96,7 +123,10 @@ def handler(job):
             "model": MODEL_ID,
             "loaded": PIPE is not None,
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+            "vram_gb": round(torch.cuda.get_device_properties(0).total_memory / 1024**3) if torch.cuda.is_available() else None,
+            "disk_free_gb": disk_free_gb(),
             "hf_home": os.environ.get("HF_HOME"),
+            "version": "3-diagnostic",
         }
 
     prompt = inp.get("prompt")
@@ -117,7 +147,8 @@ def handler(job):
     fmt = "PNG" if str(inp.get("output_format", "jpeg")).lower() == "png" else "JPEG"
 
     start = time.time()
-    pipe = get_pipe()
+    pipe = get_pipe(say)
+    say("génération")
     pipe.scheduler = SCHEDULERS["fast" if fast else "full"]
     if fast:
         pipe.enable_lora()
