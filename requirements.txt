@@ -7,3 +7,4 @@ sentencepiece
 pillow
 requests
 hf_transfer
+peft>=0.17.0
