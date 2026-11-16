@@ -1,0 +1,9 @@
+runpod>=1.7,<2
+diffusers>=0.36.0
+transformers>=4.57.0
+accelerate>=1.10.0
+safetensors
+sentencepiece
+pillow
+requests
+hf_transfer
